@@ -1,0 +1,109 @@
+# OpenClaw Gateway в Docker (опциональный альтернативный вариант).
+#
+# ВАЖНО: рабочий вариант сдачи — нативный запуск на Windows
+#        (см. start-openclaw.ps1). Docker-вариант приложен как альтернатива.
+#
+# Ключевые отличия от наивной конфигурации:
+#   * модель и URL Ollama задаются в openclaw.json, а НЕ через env-переменные
+#     (OpenClaw конфигурируется файлом ~/.openclaw/openclaw.json);
+#   * провайдер Ollama должен быть доступен по НАТИВНОМУ API
+#     http://host.docker.internal:11434 (без /v1) — иначе ломается tool calling;
+#   * прокси для Telegram не нужен: режим polling работает из РФ без VPN.
+
+services:
+  openclaw-gateway:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    restart: unless-stopped
+
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      TERM: xterm-256color
+
+      # Жёстко фиксируем пути внутри контейнера, иначе host-пути из .env
+      # протекают в рантайм и ломают старт (issue #77436).
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+
+      OPENCLAW_GATEWAY_PORT: "18789"
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      OPENCLAW_DISABLE_BONJOUR: "1"
+      TZ: ${OPENCLAW_TZ:-Europe/Moscow}
+
+      # DNS: сначала IPv4 — на части РФ-провайдеров IPv6 до Telegram не идёт.
+      NODE_OPTIONS: --dns-result-order=ipv4first
+
+    volumes:
+      # Состояние, конфиг (openclaw.json) и workspace — с хоста.
+      - ./openclaw_data:/home/node/.openclaw
+      - ./SOUL.md:/home/node/.openclaw/workspace/SOUL.md:ro
+
+    # Даёт доступ к Ollama на хосте через http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+
+    init: true
+    command:
+      [
+        "node",
+        "dist/index.js",
+        "gateway",
+        "--bind",
+        "${OPENCLAW_GATEWAY_BIND:-loopback}",
+        "--port",
+        "18789",
+      ]
+
+    healthcheck:
+      test: ["CMD", "node", "dist/docker-healthcheck.js"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # Ollama с холодной qwen3:8b поднимается долго — даём запас.
+      start_period: 120s
+
+  # CLI-обёртка: тот же образ в сетевом namespace Gateway.
+  # Пример: docker compose run --rm openclaw-cli channels status --probe
+  openclaw-cli:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+    network_mode: "service:openclaw-gateway"
+    depends_on:
+      - openclaw-gateway
+
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_GATEWAY_PORT: "18789"
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      TZ: ${OPENCLAW_TZ:-Europe/Moscow}
+
+    volumes:
+      - ./openclaw_data:/home/node/.openclaw
+      - ./SOUL.md:/home/node/.openclaw/workspace/SOUL.md:ro
+
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+
+    stdin_open: true
+    tty: true
+    init: true
+    entrypoint: ["node", "dist/index.js"]
